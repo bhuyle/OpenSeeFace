@@ -724,6 +724,9 @@ class Tracker():
             results.append((x - r, y - r, 2 * r, 2 * r * 1.0))
         results = np.array(results).astype(np.float32)
         if results.shape[0] > 0:
+            # results[:, [0]] *= frame.shape[1] / 200.
+            # results[:, [2]] *= frame.shape[1] / 285.
+            # results[:, [1,3]] *= frame.shape[0] / 210.
             results[:, [0,2]] *= frame.shape[1] / 224.
             results[:, [1,3]] *= frame.shape[0] / 224.
         return results
@@ -1210,3 +1213,226 @@ class Tracker():
         results = sorted(results, key=lambda x: x.id)
 
         return results
+    def assign_face_info_v2(self, results):
+        if self.max_faces == 1 and len(results) == 1:
+            conf, (lms, eye_state), conf_adjust = results[0]
+            self.face_info[0].update((conf - conf_adjust, (lms, eye_state)), np.array(lms)[:, 0:2].mean(0), self.frame_count)
+            return
+        result_coords = []
+        adjusted_results = []
+        for conf, (lms, eye_state), conf_adjust in results:
+            adjusted_results.append((conf - conf_adjust, (lms, eye_state)))
+            result_coords.append(np.array(lms)[:, 0:2].mean(0))
+        results = adjusted_results
+        candidates = [[]] * self.max_faces
+        max_dist = 2 * np.linalg.norm(np.array([self.width, self.height]))
+        for i, face_info in enumerate(self.face_info):
+            for j, coord in enumerate(result_coords):
+                if face_info.coord is None:
+                    candidates[i].append((max_dist, i, j))
+                else:
+                    candidates[i].append((np.linalg.norm(face_info.coord - coord), i, j))
+        for i, candidate in enumerate(candidates):
+            candidates[i] = sorted(candidate)
+        found = 0
+        target = len(results)
+        used_results = {}
+        used_faces = {}
+        while found < target:
+            min_list = min(candidates)
+            candidate = min_list.pop(0)
+            face_idx = candidate[1]
+            result_idx = candidate[2]
+            if not result_idx in used_results and not face_idx in used_faces:
+                self.face_info[face_idx].update(results[result_idx], result_coords[result_idx], self.frame_count)
+                min_list.clear()
+                used_results[result_idx] = True
+                used_faces[face_idx] = True
+                found += 1
+            if len(min_list) == 0:
+                min_list.append((2 * max_dist, face_idx, result_idx))
+        for face_info in self.face_info:
+            if face_info.frame_count != self.frame_count:
+                face_info.update(None, None, self.frame_count)
+
+
+    def predict_bboxonly(self, frame, additional_faces=[]):
+        self.frame_count += 1
+        start = time.perf_counter()
+        im = frame
+
+        duration_fd = 0.0
+        duration_pp = 0.0
+        duration_model = 0.0
+        duration_pnp = 0.0
+
+        new_faces = []
+        new_faces.extend(self.faces)
+        bonus_cutoff = len(self.faces)
+        new_faces.extend(additional_faces)
+        self.wait_count += 1
+        if self.detected == 0:
+            start_fd = time.perf_counter()
+            if self.use_retinaface > 0 or self.try_hard:
+                retinaface_detections = self.retinaface.detect_retina(frame)
+                new_faces.extend(retinaface_detections)
+            if self.use_retinaface == 0 or self.try_hard:
+                new_faces.extend(self.detect_faces(frame))
+            if self.try_hard:
+                new_faces.extend([(0, 0, self.width, self.height)])
+            duration_fd = 1000 * (time.perf_counter() - start_fd)
+            self.wait_count = 0
+        elif self.detected < self.max_faces:
+            if self.use_retinaface > 0:
+                new_faces.extend(self.retinaface_scan.get_results())
+            if self.wait_count >= self.scan_every:
+                if self.use_retinaface > 0:
+                    self.retinaface_scan.background_detect(frame)
+                else:
+                    start_fd = time.perf_counter()
+                    new_faces.extend(self.detect_faces(frame))
+                    duration_fd = 1000 * (time.perf_counter() - start_fd)
+                    self.wait_count = 0
+        else:
+            self.wait_count = 0
+
+        if len(new_faces) < 1:
+            duration = (time.perf_counter() - start) * 1000
+            if not self.silent:
+                print(f"Took {duration:.2f}ms")
+            print(self.face_info)
+            return []
+
+        crops = []
+        crop_info = []
+        num_crops = 0
+        for j, (x,y,w,h) in enumerate(new_faces):
+            crop_x1 = x - int(w * 0.1)
+            crop_y1 = y - int(h * 0.125)
+            crop_x2 = x + w + int(w * 0.1)
+            crop_y2 = y + h + int(h * 0.125)
+
+            crop_x1, crop_y1 = clamp_to_im((crop_x1, crop_y1), self.width, self.height)
+            crop_x2, crop_y2 = clamp_to_im((crop_x2, crop_y2), self.width, self.height)
+
+            scale_x = float(crop_x2 - crop_x1) / self.res
+            scale_y = float(crop_y2 - crop_y1) / self.res
+
+            if crop_x2 - crop_x1 < 4 or crop_y2 - crop_y1 < 4:
+                continue
+
+            start_pp = time.perf_counter()
+            crop = self.preprocess(im, (crop_x1, crop_y1, crop_x2, crop_y2))
+            duration_pp += 1000 * (time.perf_counter() - start_pp)
+            crops.append(crop)
+            crop_info.append((crop_x1, crop_y1, scale_x, scale_y, 0.0 if j >= bonus_cutoff else 0.1))
+            num_crops += 1
+        start_model = time.perf_counter()
+        outputs = {}
+        if num_crops == 1:
+            output = self.session.run([], {self.input_name: crops[0]})[0]
+            conf, lms = self.landmarks(output[0], crop_info[0])
+            if conf > self.threshold:
+                try:
+                    eye_state = self.get_eye_state(frame, lms)
+                except:
+                    eye_state = [(1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)]
+                outputs[crop_info[0]] = (conf, (lms, eye_state), 0)
+        else:
+            started = 0
+            results = queue.Queue()
+            for i in range(min(num_crops, self.max_workers)):
+                thread = threading.Thread(target=worker_thread, args=(self.sessions[started], frame, crops[started], crop_info[started], results, self.input_name, started, self))
+                started += 1
+                thread.start()
+            returned = 0
+            while returned < num_crops:
+                result = results.get(True)
+                if len(result) != 1:
+                    session, conf, lms, sample_crop_info, idx = result
+                    outputs[sample_crop_info] = (conf, lms, idx)
+                else:
+                    session = result[0]
+                returned += 1
+                if started < num_crops:
+                    thread = threading.Thread(target=worker_thread, args=(session, frame, crops[started], crop_info[started], results, self.input_name, started, self))
+                    started += 1
+                    thread.start()
+
+        actual_faces = []
+        good_crops = []
+        for crop in crop_info:
+            if crop not in outputs:
+                continue
+            conf, lms, i = outputs[crop]
+            x1, y1, _ = lms[0].min(0)
+            x2, y2, _ = lms[0].max(0)
+            bb = (x1, y1, x2 - x1, y2 - y1)
+            outputs[crop] = (conf, lms, i, bb)
+            actual_faces.append(bb)
+            good_crops.append(crop)
+        groups = group_rects(actual_faces)
+        best_results = {}
+        for crop in good_crops:
+            conf, lms, i, bb = outputs[crop]
+            if conf < self.threshold:
+                continue;
+            group_id = groups[str(bb)][0]
+            if not group_id in best_results:
+                best_results[group_id] = [-1, [], 0]
+            if conf > self.threshold and best_results[group_id][0] < conf + crop[4]:
+                best_results[group_id][0] = conf + crop[4]
+                best_results[group_id][1] = lms
+                best_results[group_id][2] = crop[4]
+        sorted_results = sorted(best_results.values(), key=lambda x: x[0], reverse=True)[:self.max_faces]
+        # for index in sorted_results:
+        #     print(index[0])
+        self.assign_face_info_v2(sorted_results)
+        duration_model = 1000 * (time.perf_counter() - start_model)
+        results = []
+        detected = []
+        start_pnp = time.perf_counter()
+        for face_info in self.face_info:
+            if face_info.alive and face_info.conf > self.threshold:
+                # face_info.success, face_info.quaternion, face_info.euler, face_info.pnp_error, face_info.pts_3d, face_info.lms = self.estimate_depth(face_info)
+                # face_info.adjust_3d()
+                lms = face_info.lms[:, 0:2]
+                x1, y1 = tuple(lms[0:66].min(0))
+                x2, y2 = tuple(lms[0:66].max(0))
+                bbox = (y1, x1, y2 - y1, x2 - x1)
+                face_info.bbox = bbox
+                detected.append(bbox)
+                results.append(face_info)
+        # for index in results:
+        #     print(index.id)
+        duration_pnp += 1000 * (time.perf_counter() - start_pnp)
+        if len(detected) > 0:
+            self.detected = len(detected)
+            self.faces = detected
+            self.discard = 0
+        else:
+            self.detected = 0
+            self.discard += 1
+            if self.discard > self.discard_after:
+                self.faces = []
+            else:
+                if self.bbox_growth > 0:
+                    faces = []
+                    for (x,y,w,h) in self.faces:
+                        x -= w * self.bbox_growth
+                        y -= h * self.bbox_growth
+                        w += 2 * w * self.bbox_growth
+                        h += 2 * h * self.bbox_growth
+                        faces.append((x,y,w,h))
+                    self.faces = faces
+        self.faces = [x for x in self.faces if not np.isnan(np.array(x)).any()]
+        self.detected = len(self.faces)
+
+        duration = (time.perf_counter() - start) * 1000
+        if not self.silent:
+            print(f"Took {duration:.2f}ms (detect: {duration_fd:.2f}ms, crop: {duration_pp:.2f}ms, track: {duration_model:.2f}ms, 3D points: {duration_pnp:.2f}ms)")
+
+        results = sorted(results, key=lambda x: x.id)
+
+        return results
+
