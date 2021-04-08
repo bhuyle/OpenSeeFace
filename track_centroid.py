@@ -182,22 +182,48 @@ frame_count = 0
 
 features = ["eye_l", "eye_r", "eyebrow_steepness_l", "eyebrow_updown_l", "eyebrow_quirk_l", "eyebrow_steepness_r", "eyebrow_updown_r", "eyebrow_quirk_r", "mouth_corner_updown_l", "mouth_corner_inout_l", "mouth_corner_updown_r", "mouth_corner_inout_r", "mouth_open", "mouth_wide"]
 
-if args.log_data != "":
-    log = open(args.log_data, "w")
-    log.write("Frame,Time,Width,Height,FPS,Face,FaceID,RightOpen,LeftOpen,AverageConfidence,Success3D,PnPError,RotationQuat.X,RotationQuat.Y,RotationQuat.Z,RotationQuat.W,Euler.X,Euler.Y,Euler.Z,RVec.X,RVec.Y,RVec.Z,TVec.X,TVec.Y,TVec.Z")
-    for i in range(66):
-        log.write(f",Landmark[{i}].X,Landmark[{i}].Y,Landmark[{i}].Confidence")
-    for i in range(66):
-        log.write(f",Point3D[{i}].X,Point3D[{i}].Y,Point3D[{i}].Z")
-    for feature in features:
-        log.write(f",{feature}")
-    log.write("\r\n")
-    log.flush()
 
 is_camera = args.capture == str(try_int(args.capture))
-print(try_int(args.faces))
-list_face = [0] * int(args.faces)
-num_face_current = 0
+
+# Image normalization constants
+mean = np.float32(np.array([0.485, 0.456, 0.406]))
+std = np.float32(np.array([0.229, 0.224, 0.225]))
+mean = mean / std
+std = std * 255.0
+
+mean = - mean
+std = 1.0 / std
+mean_32 = np.tile(mean, [32, 32, 1])
+std_32 = np.tile(std, [32, 32, 1])
+mean_224 = np.tile(mean, [224, 224, 1])
+std_224 = np.tile(std, [224, 224, 1])
+mean_res = mean_224
+std_res = std_224
+res = 224.
+
+def preprocess(im, crop):
+    x1, y1, x2, y2 = crop
+    im = np.float32(im[y1:y2, x1:x2,::-1]) # Crop and BGR to RGB
+    im = cv2.resize(im, (224, 224), interpolation=cv2.INTER_LINEAR) * std_res + mean_res
+    im = np.expand_dims(im, 0)
+    im = np.transpose(im, (0,3,1,2))
+    return im
+
+def clamp_to_im(pt, w, h):
+    x = pt[0]
+    y = pt[1]
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    if x >= w:
+        x = w-1
+    if y >= h:
+        y = h-1
+    return (int(x), int(y+1))
+
+from centroidtracker_mine import CentroidTracker
+ct = CentroidTracker()
 try:
     attempt = 0
     frame_time = time.perf_counter()
@@ -254,158 +280,55 @@ try:
 
         try:
             start = time.time()
-
+            rects = []
             inference_start = time.perf_counter()
-            faces,num_face_current,list_face = tracker.predict_bboxonly(frame,num_face_current,list_face)
-            print('num_face_current',num_face_current)
-            # faces1 = tracker.detect_faces(frame)
-            # print(faces)
-            # for face in faces1:
-            #     x,y,w,h = face.astype('int')
-            #     x1 = x
-            #     y1 = y
-            #     x2 = x + w
-            #     y2 = y + h
+            faces1 = tracker.detect_faces(frame)
+            for face in faces1:
+                x,y,w,h = face.astype('int')
+                x1 = x
+                y1 = y
+                x2 = x + w
+                y2 = y + h
 
-                # x1 = x - int(w * 0.1)
-                # y1 = y - int(h * 0.125)
-                # x2 = x + w + int(w * 0.1)
-                # y2 = y + h + int(h * 0.125)
+                x1 = x + int(w * 0.25)
+                y1 = y # int(h * 0.125)
+                x2 = x + int(w * 0.85)
+                y2 = y + h + int(h * 0.125)
+
                 # x1, y1 = clamp_to_im((x1, y1), width, height)
                 # x2, y2 = clamp_to_im((x2, y2), width, height)
-                # print(x1,x2,y1,y2)
-                # cv2.imshow("face",frame[y1:y2,x1:x2])
-                # cv2.rectangle(frame,(x1,y1),(x2,y2),(255,255,0),2)
-                # cv2.rectangle(frame,(x,y),(x+w,y+h),(255,255,0),2)
-            if len(faces) > 0:
-                inference_time = (time.perf_counter() - inference_start)
-                total_tracking_time += inference_time
-                tracking_time += inference_time / len(faces)
-                tracking_frames += 1
-            packet = bytearray()
-            detected = False
-            for face_num, f in enumerate(faces):
-                f = copy.copy(f)
-                box = f.bbox
-                x1 = int(box[0])
-                y1 = int(box[1])
-                x2 = int(box[2])
-                y2 = int(box[3])
-                cv2.rectangle(frame,(x1,y1),(x1+x2,y1+y2),(255,255,0),2)
-                f.id += args.face_id_offset
-                if f.eye_blink is None:
-                    f.eye_blink = [1, 1]
-                right_state = "O" if f.eye_blink[0] > 0.30 else "-"
-                left_state = "O" if f.eye_blink[1] > 0.30 else "-"
-                # list_face[f.id] = 1
-                if args.silent == 0:
-                    print(f"Confidence[{f.id}]: {f.conf:.4f} / 3D fitting error: {f.pnp_error:.4f} / Eyes: {left_state}, {right_state}")
-                detected = True
-            #     if not f.success:
-            #         pts_3d = np.zeros((70, 3), np.float32)
-            #     packet.extend(bytearray(struct.pack("d", now)))
-            #     packet.extend(bytearray(struct.pack("i", f.id)))
-            #     packet.extend(bytearray(struct.pack("f", width)))
-            #     packet.extend(bytearray(struct.pack("f", height)))
-            #     packet.extend(bytearray(struct.pack("f", f.eye_blink[0])))
-            #     packet.extend(bytearray(struct.pack("f", f.eye_blink[1])))
-            #     packet.extend(bytearray(struct.pack("B", 1 if f.success else 0)))
-            #     packet.extend(bytearray(struct.pack("f", f.pnp_error)))
-            #     packet.extend(bytearray(struct.pack("f", f.quaternion[0])))
-            #     packet.extend(bytearray(struct.pack("f", f.quaternion[1])))
-            #     packet.extend(bytearray(struct.pack("f", f.quaternion[2])))
-            #     packet.extend(bytearray(struct.pack("f", f.quaternion[3])))
-            #     packet.extend(bytearray(struct.pack("f", f.euler[0])))
-            #     packet.extend(bytearray(struct.pack("f", f.euler[1])))
-            #     packet.extend(bytearray(struct.pack("f", f.euler[2])))
-            #     packet.extend(bytearray(struct.pack("f", f.translation[0])))
-            #     packet.extend(bytearray(struct.pack("f", f.translation[1])))
-            #     packet.extend(bytearray(struct.pack("f", f.translation[2])))
-            #     if not log is None:
-            #         log.write(f"{frame_count},{now},{width},{height},{args.fps},{face_num},{f.id},{f.eye_blink[0]},{f.eye_blink[1]},{f.conf},{f.success},{f.pnp_error},{f.quaternion[0]},{f.quaternion[1]},{f.quaternion[2]},{f.quaternion[3]},{f.euler[0]},{f.euler[1]},{f.euler[2]},{f.rotation[0]},{f.rotation[1]},{f.rotation[2]},{f.translation[0]},{f.translation[1]},{f.translation[2]}")
-            #     for (x,y,c) in f.lms:
-            #         packet.extend(bytearray(struct.pack("f", c)))
-                # if args.visualize > 1:
-                #     frame = cv2.putText(frame, str(f.id), (int(f.bbox[0]), int(f.bbox[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,0,255),3)
-            #     if args.visualize > 2:
-            #         frame = cv2.putText(frame, f"{f.conf:.4f}", (int(f.bbox[0] + 18), int(f.bbox[1] - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
-            #     for pt_num, (x,y,c) in enumerate(f.lms):
-            #         packet.extend(bytearray(struct.pack("f", y)))
-            #         packet.extend(bytearray(struct.pack("f", x)))
-            #         if not log is None:
-            #             log.write(f",{y},{x},{c}")
-            #         if pt_num == 66 and (f.eye_blink[0] < 0.30 or c < 0.30):
-            #             continue
-            #         if pt_num == 67 and (f.eye_blink[1] < 0.30 or c < 0.30):
-            #             continue
-            #         x = int(x + 0.5)
-            #         y = int(y + 0.5)
-            #         if args.visualize != 0 or not out is None:
-            #             if args.visualize > 3:
-            #                 frame = cv2.putText(frame, str(pt_num), (int(y), int(x)), cv2.FONT_HERSHEY_SIMPLEX, 0.25, (255,255,0))
-            #             color = (0, 255, 0)
-            #             if pt_num >= 66:
-            #                 color = (255, 255, 0)
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = color
-            #             x += 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = color
-            #             y += 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = color
-            #             x -= 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = color
-            #     if args.pnp_points != 0 and (args.visualize != 0 or not out is None) and f.rotation is not None:
-            #         if args.pnp_points > 1:
-            #             projected = cv2.projectPoints(f.face_3d[0:66], f.rotation, f.translation, tracker.camera, tracker.dist_coeffs)
-            #         else:
-            #             projected = cv2.projectPoints(f.contour, f.rotation, f.translation, tracker.camera, tracker.dist_coeffs)
-            #         for [(x,y)] in projected[0]:
-            #             x = int(x + 0.5)
-            #             y = int(y + 0.5)
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = (0, 255, 255)
-            #             x += 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = (0, 255, 255)
-            #             y += 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = (0, 255, 255)
-            #             x -= 1
-            #             if not (x < 0 or y < 0 or x >= height or y >= width):
-            #                 frame[int(x), int(y)] = (0, 255, 255)
-            #     for (x,y,z) in f.pts_3d:
-            #         packet.extend(bytearray(struct.pack("f", x)))
-            #         packet.extend(bytearray(struct.pack("f", -y)))
-            #         packet.extend(bytearray(struct.pack("f", -z)))
-            #         if not log is None:
-            #             log.write(f",{x},{-y},{-z}")
-            #     if f.current_features is None:
-            #         f.current_features = {}
-            #     for feature in features:
-            #         if not feature in f.current_features:
-            #             f.current_features[feature] = 0
-            #         packet.extend(bytearray(struct.pack("f", f.current_features[feature])))
-            #         if not log is None:
-            #             log.write(f",{f.current_features[feature]}")
-            #     if not log is None:
-            #         log.write("\r\n")
-            #         log.flush()
 
-            # if detected and len(faces) < 40:
-            #     sock.sendto(packet, (target_ip, target_port))
+                # scale_x = float(x2 - x1) / res
+                # scale_y = float(y2 - y1) / res
+                # print(scale_x,scale_y)
 
-            # if not out is None:
-            #     video_frame = frame
-            #     if args.video_scale != 1:
-            #         video_frame = cv2.resize(frame, (width * args.video_scale, height * args.video_scale), interpolation=cv2.INTER_NEAREST)
-            #     out.write(video_frame)
-            #     if args.video_scale != 1:
-            #         del video_frame
+                # crop_info.append((x1, y1, scale_x, scale_y, 0.0)
 
+                # actual_faces = []
+                # good_crops = []
+                # for crop in crop_info:
+                #     conf, lms, i = outputs[crop]
+                #     x1, y1, _ = lms[0].min(0)
+                #     x2, y2, _ = lms[0].max(0)
+                #     bb = (x1, y1, x2 - x1, y2 - y1)
+                #     outputs[crop] = (conf, lms, i, bb)
+                #     actual_faces.append(bb)
+                #     good_crops.append(crop)
+                # crop = preprocess(frame, (x1, y1, x2, y2))
+                # crops.append(crop)
+                # print(crop)
+                # cv2.rectangle(frame,(crop[0],crop[1]),(crop[2],crop[3]),(255,255,0),2)
+                box = np.array([x1,y1,x2,y2])
+                rects.append(box.astype("int"))
+                cv2.rectangle(frame,(x1,y1),(x2,y2),(255,255,0),2)
 
+            objects = ct.update(rects)
+
+            for (objectID, centroid) in objects.items():
+                text = "ID {}".format(objectID)
+                cv2.putText(frame, text, (centroid[0] - 10, centroid[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.circle(frame, (centroid[0], centroid[1]), 4, (0, 255, 0), -1)
+            
             end = time.time()
             fps = str(int(1/(end-start)))
             cv2.putText(frame, fps,(5,25),
@@ -444,12 +367,4 @@ except KeyboardInterrupt:
     if args.silent == 0:
         print("Quitting")
 
-input_reader.close()
-if not out is None:
-    out.release()
-cv2.destroyAllWindows()
 
-if args.silent == 0 and tracking_frames > 0:
-    average_tracking_time = 1000 * tracking_time / tracking_frames
-    print(f"Average tracking time per detected face: {average_tracking_time:.2f} ms")
-    print(f"Tracking time: {total_tracking_time:.3f} s\nFrames: {tracking_frames}")

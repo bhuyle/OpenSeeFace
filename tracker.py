@@ -376,7 +376,10 @@ class FaceInfo():
             self.conf, (self.lms, self.eye_state) = result
             self.coord = coord
             self.alive = True
-
+    # def show_info(self):
+    #     if self.coord is not None:
+    #         for index in self.coord:
+    #             print(index)
     def update_contour(self):
         self.contour = np.array(self.face_3d[self.contour_pts])
 
@@ -1211,9 +1214,10 @@ class Tracker():
             print(f"Took {duration:.2f}ms (detect: {duration_fd:.2f}ms, crop: {duration_pp:.2f}ms, track: {duration_model:.2f}ms, 3D points: {duration_pnp:.2f}ms)")
 
         results = sorted(results, key=lambda x: x.id)
-
         return results
-    def assign_face_info_v2(self, results):
+
+
+    def assign_face_info_v2(self, results,num_face_current,list_face):
         if self.max_faces == 1 and len(results) == 1:
             conf, (lms, eye_state), conf_adjust = results[0]
             self.face_info[0].update((conf - conf_adjust, (lms, eye_state)), np.array(lms)[:, 0:2].mean(0), self.frame_count)
@@ -1232,18 +1236,33 @@ class Tracker():
                     candidates[i].append((max_dist, i, j))
                 else:
                     candidates[i].append((np.linalg.norm(face_info.coord - coord), i, j))
+        # print('candidates',candidates)
+        
         for i, candidate in enumerate(candidates):
             candidates[i] = sorted(candidate)
+        # print('candidates_sorted',candidates)
+        # num_face_current = 0
         found = 0
         target = len(results)
         used_results = {}
         used_faces = {}
+
+        tmp = [0] * self.max_faces
         while found < target:
             min_list = min(candidates)
             candidate = min_list.pop(0)
             face_idx = candidate[1]
             result_idx = candidate[2]
+
             if not result_idx in used_results and not face_idx in used_faces:
+                # print('face_idx',face_idx)
+
+                if list_face[face_idx] == 0:
+                    list_face[face_idx] = 1
+                    self.face_info[face_idx].update(None, None, self.frame_count)
+                    face_idx = num_face_current + 1
+
+                tmp[face_idx] = 1
                 self.face_info[face_idx].update(results[result_idx], result_coords[result_idx], self.frame_count)
                 min_list.clear()
                 used_results[result_idx] = True
@@ -1251,12 +1270,19 @@ class Tracker():
                 found += 1
             if len(min_list) == 0:
                 min_list.append((2 * max_dist, face_idx, result_idx))
+
+        # for i in range(len(tmp)):
+        #     if list_face[i] == 1 and tmp[i] == 0:
+        #         self.face_info[i].update(None, None, self.frame_count)
+        list_face = tmp
         for face_info in self.face_info:
             if face_info.frame_count != self.frame_count:
-                face_info.update(None, None, self.frame_count)
+                face_info.update(None, max_dist, self.frame_count)
+        print('list_face',list_face)
+        return list_face
 
 
-    def predict_bboxonly(self, frame, additional_faces=[]):
+    def predict_bboxonly(self, frame, num_face_current,list_face,additional_faces=[]):
         self.frame_count += 1
         start = time.perf_counter()
         im = frame
@@ -1300,8 +1326,7 @@ class Tracker():
             duration = (time.perf_counter() - start) * 1000
             if not self.silent:
                 print(f"Took {duration:.2f}ms")
-            print(self.face_info)
-            return []
+            return [],0,[0]*self.max_faces  
 
         crops = []
         crop_info = []
@@ -1376,7 +1401,7 @@ class Tracker():
         for crop in good_crops:
             conf, lms, i, bb = outputs[crop]
             if conf < self.threshold:
-                continue;
+                continue
             group_id = groups[str(bb)][0]
             if not group_id in best_results:
                 best_results[group_id] = [-1, [], 0]
@@ -1387,7 +1412,27 @@ class Tracker():
         sorted_results = sorted(best_results.values(), key=lambda x: x[0], reverse=True)[:self.max_faces]
         # for index in sorted_results:
         #     print(index[0])
-        self.assign_face_info_v2(sorted_results)
+
+        # if self.face_info[0].frame_count <= 3:
+        #     list_face = [0]*self.max_faces
+        #     print(list_face)
+        # num_face_current = None
+        
+        # if num_face_current is None:
+        #     num_face_current = 0
+        # else: num_face_current = num_crops
+        # num_face_current = num_crops
+        # num_face_current = np.argmax(list_face)
+
+        for i in range(self.max_faces-1,num_face_current-1,-1):
+            if list_face[i] == 1:
+                num_face_current = i
+                break
+        list_face = self.assign_face_info_v2(sorted_results,num_face_current,list_face)
+
+        
+        # self.assign_face_info_v2(sorted_results)
+
         duration_model = 1000 * (time.perf_counter() - start_model)
         results = []
         detected = []
@@ -1434,5 +1479,5 @@ class Tracker():
 
         results = sorted(results, key=lambda x: x.id)
 
-        return results
+        return results,num_face_current,list_face
 
