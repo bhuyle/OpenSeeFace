@@ -26,7 +26,7 @@ parser.add_argument("-d", "--detection-threshold", type=float, help="Set minimum
 parser.add_argument("-v", "--visualize", type=int, help="Set this to 1 to visualize the tracking, to 2 to also show face ids, to 3 to add confidence values or to 4 to add numbers to the point display", default=0)
 parser.add_argument("-P", "--pnp-points", type=int, help="Set this to 1 to add the 3D fitting points to the visualization", default=0)
 parser.add_argument("-s", "--silent", type=int, help="Set this to 1 to prevent text output on the console", default=0)
-parser.add_argument("--faces", type=int, help="Set the maximum number of faces (slow)", default=1)
+parser.add_argument("--faces", type=int, help="Set the maximum number of faces (slow)", default=10)
 parser.add_argument("--scan-retinaface", type=int, help="When set to 1, scanning for additional faces will be performed using RetinaFace in a background thread, otherwise a simpler, faster face detection mechanism is used. When the maximum number of faces is 1, this option does nothing.", default=0)
 parser.add_argument("--scan-every", type=int, help="Set after how many frames a scan for new faces should run", default=3)
 parser.add_argument("--discard-after", type=int, help="Set the how long the tracker should keep looking for lost faces", default=10)
@@ -252,6 +252,8 @@ try:
         try:
             inference_start = time.perf_counter()
             faces = tracker.predict(frame)
+            print("Length face",len(faces))
+            start = time.time()
             if len(faces) > 0:
                 inference_time = (time.perf_counter() - inference_start)
                 total_tracking_time += inference_time
@@ -374,6 +376,8 @@ try:
                     del video_frame
 
             if args.visualize != 0:
+                end = time.time()
+                print("FPS",int(1/(end-start)))
                 cv2.imshow('OpenSeeFace Visualization', frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     if args.dump_points != "" and not faces is None and len(faces) > 0:

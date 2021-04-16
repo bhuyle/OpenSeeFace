@@ -1,0 +1,3 @@
+MAIN:
+  path_file_config_cam: "configs/ipCamera.yaml"
+  path_file_deep_sort: "configs/deep_sort.yaml"

@@ -1,0 +1,23 @@
+# DEEPSORT:
+#   MODEL: "models/deep_sort/market1501.pb"
+#   MAX_COSINE_DISTANCE: 0.7
+#   NN_BUDGET: 50
+#   NMS_MAX_OVERLAP: 0.75
+#   MAX_IOU_DISTANCE: 0.85
+#   MAX_AGE: 30
+#   N_INIT: 1
+#   _STD_WEIGHT_POSITION: 12         # inverse of _std_weight_position
+#   _STD_WEIGHT_VELOCITY: 100         # inverse of _std_weight_velocity
+
+
+
+DEEPSORT:
+  MODEL: "models/deep_sort/market1501.pb"
+  MAX_COSINE_DISTANCE: 1.5
+  NN_BUDGET: 50
+  NMS_MAX_OVERLAP: 0.85
+  MAX_IOU_DISTANCE: 0.95
+  MAX_AGE: 10
+  N_INIT: 1
+  _STD_WEIGHT_POSITION: 12         # inverse of _std_weight_position
+  _STD_WEIGHT_VELOCITY: 100         # inverse of _std_weight_velocity

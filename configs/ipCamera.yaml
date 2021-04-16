@@ -1,0 +1,6 @@
+CAM:
+  proto: "rtsp"
+  user: "admin"
+  password: "Admin123"
+  ip: "113.161.51.163"
+  port: "554"
